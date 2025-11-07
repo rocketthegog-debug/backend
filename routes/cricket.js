@@ -9,12 +9,16 @@ import {
   getCacheStatus,
   refreshCache,
 } from '../services/cricketService.js'
+import { setCacheHeaders, CACHE_DURATIONS } from '../config/cache.js'
 
 const router = express.Router()
 
 // Get cache status
 router.get('/cache-status', async (req, res) => {
   try {
+    // No cache for cache status (always fresh)
+    setCacheHeaders(res, CACHE_DURATIONS.CACHE_STATUS)
+    
     const status = getCacheStatus()
     res.json({
       success: true,
@@ -101,6 +105,9 @@ router.get('/matches', async (req, res) => {
     const matches = await getAllMatches()
     const cacheStatus = getCacheStatus()
     
+    // Set cache headers for Vercel edge caching (30 seconds)
+    setCacheHeaders(res, CACHE_DURATIONS.CRICKET_MATCHES)
+    
     // Check if we have data
     const hasData = matches.live.length > 0 || matches.upcoming.length > 0
     
@@ -154,6 +161,9 @@ router.get('/matches', async (req, res) => {
 // Get current/live matches only
 router.get('/matches/current', async (req, res) => {
   try {
+    // Set cache headers for Vercel edge caching (30 seconds)
+    setCacheHeaders(res, CACHE_DURATIONS.CRICKET_MATCHES)
+    
     const matches = await getCurrentMatches()
     res.json({
       success: true,
@@ -172,6 +182,9 @@ router.get('/matches/current', async (req, res) => {
 // Get upcoming matches only
 router.get('/matches/upcoming', async (req, res) => {
   try {
+    // Set cache headers for Vercel edge caching (30 seconds)
+    setCacheHeaders(res, CACHE_DURATIONS.CRICKET_MATCHES)
+    
     const matches = await getUpcomingMatches()
     res.json({
       success: true,
@@ -190,6 +203,9 @@ router.get('/matches/upcoming', async (req, res) => {
 // Get match details by ID
 router.get('/matches/:matchId', async (req, res) => {
   try {
+    // Set cache headers for Vercel edge caching (5 minutes)
+    setCacheHeaders(res, CACHE_DURATIONS.MATCH_DETAILS)
+    
     const { matchId } = req.params
     const match = await getMatchDetails(matchId)
     
@@ -220,6 +236,9 @@ router.get('/matches/:matchId', async (req, res) => {
 // Get series list
 router.get('/series', async (req, res) => {
   try {
+    // Set cache headers for Vercel edge caching (10 minutes)
+    setCacheHeaders(res, CACHE_DURATIONS.SERIES_LIST)
+    
     const series = await getSeriesList()
     res.json({
       success: true,
