@@ -233,8 +233,9 @@ const cricketAPI = axios.create({
 
 /**
  * Internal function to fetch and update current matches cache
+ * Exported for on-demand fetching in serverless environments
  */
-const updateCurrentMatchesCache = async () => {
+export const updateCurrentMatchesCache = async () => {
   if (cache.isUpdatingCurrent) {
     console.log('⏳ Current matches cache update already in progress, skipping...')
     return // Skip if already updating
@@ -365,8 +366,9 @@ const updateCurrentMatchesCache = async () => {
 
 /**
  * Internal function to fetch and update upcoming matches cache
+ * Exported for on-demand fetching in serverless environments
  */
-const updateUpcomingMatchesCache = async () => {
+export const updateUpcomingMatchesCache = async () => {
   if (cache.isUpdatingUpcoming) {
     console.log('⏳ Upcoming matches cache update already in progress, skipping...')
     return // Skip if already updating
@@ -556,29 +558,45 @@ export const refreshCache = async () => {
 }
 
 /**
- * Get current/live matches - returns cached data only
+ * Get current/live matches - returns cached data, or fetches if cache is empty (for serverless)
  */
 export const getCurrentMatches = async () => {
-  // Always return cached data - no API calls here
-  if (cache.current && cache.current.data && Array.isArray(cache.current.data)) {
+  // Return cached data if available and not empty
+  if (cache.current && cache.current.data && Array.isArray(cache.current.data) && cache.current.data.length > 0) {
     return cache.current
   }
   
-  // Return empty if no cache available
-  return { data: [] }
+  // If cache is empty, fetch data on-demand (especially important for Vercel serverless)
+  // This ensures data is available even if background cache updater hasn't run
+  console.log('🔄 Cache empty for current matches, fetching on-demand...')
+  try {
+    const result = await updateCurrentMatchesCache()
+    return result || { data: [] }
+  } catch (error) {
+    console.error('❌ Error fetching current matches on-demand:', error.message)
+    return { data: [] }
+  }
 }
 
 /**
- * Get upcoming matches - returns cached data only
+ * Get upcoming matches - returns cached data, or fetches if cache is empty (for serverless)
  */
 export const getUpcomingMatches = async () => {
-  // Always return cached data - no API calls here
-  if (cache.upcoming && cache.upcoming.data && Array.isArray(cache.upcoming.data)) {
+  // Return cached data if available and not empty
+  if (cache.upcoming && cache.upcoming.data && Array.isArray(cache.upcoming.data) && cache.upcoming.data.length > 0) {
     return cache.upcoming
   }
   
-  // Return empty if no cache available
-  return { data: [] }
+  // If cache is empty, fetch data on-demand (especially important for Vercel serverless)
+  // This ensures data is available even if background cache updater hasn't run
+  console.log('🔄 Cache empty for upcoming matches, fetching on-demand...')
+  try {
+    const result = await updateUpcomingMatchesCache()
+    return result || { data: [] }
+  } catch (error) {
+    console.error('❌ Error fetching upcoming matches on-demand:', error.message)
+    return { data: [] }
+  }
 }
 
 /**
