@@ -40,16 +40,20 @@ const mongooseOptions = {
   maxPoolSize: 10, // Maintain up to 10 socket connections
   minPoolSize: 1, // Maintain at least 1 socket connection
   maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
-  bufferCommands: false, // Disable mongoose buffering
-  bufferMaxEntries: 0, // Disable mongoose buffering
 }
 
+// Configure mongoose to not buffer commands (for serverless)
+mongoose.set('bufferCommands', false)
+mongoose.set('bufferMaxEntries', 0)
+
 mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
-  .then(() => {
+  .then(async () => {
     console.log('✅ MongoDB Connected')
     // Start cache updater after MongoDB connection
     if (process.env.VERCEL !== '1') {
       startCacheUpdater()
+      // Run cleanup after connection is established
+      await cleanupOldTransactions()
     }
   })
   .catch((err) => {
@@ -115,11 +119,14 @@ const cleanupOldTransactions = async () => {
   }
 }
 
-// Run cleanup job every 24 hours
-setInterval(cleanupOldTransactions, 24 * 60 * 60 * 1000)
-
-// Run cleanup job on server start
-cleanupOldTransactions()
+// Run cleanup job every 24 hours (only if not on Vercel)
+if (process.env.VERCEL !== '1') {
+  setInterval(async () => {
+    if (mongoose.connection.readyState === 1) {
+      await cleanupOldTransactions()
+    }
+  }, 24 * 60 * 60 * 1000)
+}
 
 const PORT = process.env.PORT || 5001
 
