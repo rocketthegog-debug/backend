@@ -335,13 +335,16 @@ export const updateCurrentMatchesCache = async () => {
         if (isRateLimited) {
           console.warn('⚠️ API rate limited during cache update:', reason)
           markKeyAsRateLimited(apiKey)
-          // Keep existing cache
-          return cache.current || { data: [] }
+          // Return empty array if rate limited (can't fetch data)
+          return { data: [] }
         }
         console.error('❌ API returned failure:', reason)
+        return { data: [] }
       }
 
-      return cache.current || { data: [] }
+      // If we got here, API call succeeded but response format was unexpected
+      console.warn('⚠️ Unexpected API response format')
+      return { data: [] }
     } catch (error) {
       const errorMessage = error.message || error.response?.data?.reason || ''
       const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
@@ -350,15 +353,17 @@ export const updateCurrentMatchesCache = async () => {
                             error.response?.status === 429
       
       if (isRateLimited) {
-        console.warn('⚠️ Rate limited during cache update, keeping existing cache')
+        console.warn('⚠️ Rate limited during cache update')
         if (apiKey) {
           markKeyAsRateLimited(apiKey)
         }
-        return cache.current || { data: [] }
+        // Return empty array if rate limited (can't fetch data)
+        return { data: [] }
       }
       
       console.error('❌ Error updating current matches cache:', error.message)
-      return cache.current || { data: [] }
+      // Return empty array on error (don't return stale cache in serverless)
+      return { data: [] }
     } finally {
       cache.isUpdatingCurrent = false
     }
@@ -473,15 +478,17 @@ export const updateUpcomingMatchesCache = async () => {
                             error.response?.status === 429
       
       if (isRateLimited) {
-        console.warn('⚠️ Rate limited during cache update, keeping existing cache')
+        console.warn('⚠️ Rate limited during cache update')
         if (apiKey) {
           markKeyAsRateLimited(apiKey)
         }
-        return cache.upcoming || { data: [] }
+        // Return empty array if rate limited (can't fetch data)
+        return { data: [] }
       }
       
       console.error('❌ Error updating upcoming matches cache:', error.message)
-      return cache.upcoming || { data: [] }
+      // Return empty array on error (don't return stale cache in serverless)
+      return { data: [] }
     } finally {
       cache.isUpdatingUpcoming = false
     }
@@ -563,17 +570,32 @@ export const refreshCache = async () => {
 export const getCurrentMatches = async () => {
   // Return cached data if available and not empty
   if (cache.current && cache.current.data && Array.isArray(cache.current.data) && cache.current.data.length > 0) {
+    console.log('✅ Returning cached current matches:', cache.current.data.length)
     return cache.current
   }
   
   // If cache is empty, fetch data on-demand (especially important for Vercel serverless)
   // This ensures data is available even if background cache updater hasn't run
   console.log('🔄 Cache empty for current matches, fetching on-demand...')
+  console.log('🔍 Cache state:', {
+    hasCache: !!cache.current,
+    hasData: !!cache.current?.data,
+    isArray: Array.isArray(cache.current?.data),
+    length: cache.current?.data?.length || 0,
+    isUpdating: cache.isUpdatingCurrent
+  })
+  
   try {
     const result = await updateCurrentMatchesCache()
+    console.log('✅ On-demand fetch completed for current matches:', {
+      hasResult: !!result,
+      hasData: !!result?.data,
+      dataLength: result?.data?.length || 0
+    })
     return result || { data: [] }
   } catch (error) {
     console.error('❌ Error fetching current matches on-demand:', error.message)
+    console.error('❌ Error stack:', error.stack)
     return { data: [] }
   }
 }
@@ -584,17 +606,32 @@ export const getCurrentMatches = async () => {
 export const getUpcomingMatches = async () => {
   // Return cached data if available and not empty
   if (cache.upcoming && cache.upcoming.data && Array.isArray(cache.upcoming.data) && cache.upcoming.data.length > 0) {
+    console.log('✅ Returning cached upcoming matches:', cache.upcoming.data.length)
     return cache.upcoming
   }
   
   // If cache is empty, fetch data on-demand (especially important for Vercel serverless)
   // This ensures data is available even if background cache updater hasn't run
   console.log('🔄 Cache empty for upcoming matches, fetching on-demand...')
+  console.log('🔍 Cache state:', {
+    hasCache: !!cache.upcoming,
+    hasData: !!cache.upcoming?.data,
+    isArray: Array.isArray(cache.upcoming?.data),
+    length: cache.upcoming?.data?.length || 0,
+    isUpdating: cache.isUpdatingUpcoming
+  })
+  
   try {
     const result = await updateUpcomingMatchesCache()
+    console.log('✅ On-demand fetch completed for upcoming matches:', {
+      hasResult: !!result,
+      hasData: !!result?.data,
+      dataLength: result?.data?.length || 0
+    })
     return result || { data: [] }
   } catch (error) {
     console.error('❌ Error fetching upcoming matches on-demand:', error.message)
+    console.error('❌ Error stack:', error.stack)
     return { data: [] }
   }
 }
