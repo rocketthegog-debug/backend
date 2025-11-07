@@ -6,6 +6,8 @@ This guide explains how to configure MongoDB Atlas to work with Vercel serverles
 
 Vercel serverless functions run from dynamic IP addresses. MongoDB Atlas by default blocks connections from IPs that aren't whitelisted, causing connection timeouts.
 
+**⚠️ CRITICAL:** The most common cause of MongoDB connection failures on Vercel is **not whitelisting IP addresses**. You MUST add `0.0.0.0/0` (allow from anywhere) to your MongoDB Atlas Network Access whitelist for Vercel to work.
+
 ## Solution: Network Access Configuration
 
 ### Option 1: Allow Access from Anywhere (Recommended for Development)
@@ -56,10 +58,12 @@ MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/crickbuzz?retryW
 
 The backend is configured with serverless-optimized connection options:
 
-- **serverSelectionTimeoutMS**: 5 seconds (faster timeout)
+- **serverSelectionTimeoutMS**: 15 seconds (increased for serverless)
 - **socketTimeoutMS**: 45 seconds
 - **maxPoolSize**: 10 connections
-- **bufferCommands**: false (prevents buffering issues)
+- **minPoolSize**: 0 (connections created on demand for serverless)
+- **bufferCommands**: true (enables command buffering until connection is ready)
+- **bufferMaxEntries**: 0 (unlimited buffering for serverless)
 
 ## Testing Connection
 
