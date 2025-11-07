@@ -2,20 +2,107 @@ import axios from 'axios'
 import http from 'http'
 import https from 'https'
 
-// Helper function to get API key at runtime (ensures dotenv is loaded)
-const getApiKey = () => {
-  const key = process.env.CRICKET_API_KEY
-  if (!key) {
+// API Key Management with rotation
+let apiKeys = []
+let currentKeyIndex = 0
+let keyRateLimitMap = new Map() // Track rate limits per key: Map<key, {blockedUntil: timestamp}>
+let lastApiCallTime = 0 // Throttling: 10 seconds between calls
+const THROTTLE_DELAY = 10000 // 10 seconds
+let keysInitialized = false
+
+// Initialize API keys from environment variable (comma-separated)
+const initializeApiKeys = () => {
+  if (keysInitialized) return // Prevent multiple initializations
+  
+  const keysString = process.env.CRICKET_API_KEY || ''
+  if (!keysString) {
     console.error('❌ CRICKET_API_KEY is not set in environment variables')
-  } else {
-    // Log first few characters for debugging (only once per minute to avoid spam)
-    const now = Date.now()
-    if (!getApiKey.lastLog || now - getApiKey.lastLog > 60000) {
-      console.log('🔑 Using API key:', key.substring(0, 10) + '...')
-      getApiKey.lastLog = now
-    }
+    return
   }
+  
+  // Split by comma and trim whitespace
+  apiKeys = keysString.split(',').map(key => key.trim()).filter(key => key.length > 0)
+  
+  if (apiKeys.length === 0) {
+    console.error('❌ No valid API keys found in CRICKET_API_KEY')
+  } else {
+    console.log(`🔑 Loaded ${apiKeys.length} API key(s)`)
+    // Initialize rate limit tracking for all keys
+    apiKeys.forEach(key => {
+      keyRateLimitMap.set(key, { blockedUntil: null })
+    })
+    keysInitialized = true
+  }
+}
+
+// Initialize on module load - will be called after dotenv.config() in server.js
+// Also provide a function to re-initialize if needed
+export const reinitializeApiKeys = () => {
+  keysInitialized = false
+  initializeApiKeys()
+}
+
+// Try to initialize immediately (in case dotenv was already loaded)
+initializeApiKeys()
+
+// Get next available API key (rotates through keys, skips rate-limited ones)
+const getApiKey = () => {
+  if (apiKeys.length === 0) {
+    console.error('❌ No API keys available')
+    return null
+  }
+  
+  const now = Date.now()
+  let attempts = 0
+  let key = null
+  
+  // Try to find an available key (not rate limited)
+  while (attempts < apiKeys.length) {
+    const keyInfo = keyRateLimitMap.get(apiKeys[currentKeyIndex])
+    const isBlocked = keyInfo && keyInfo.blockedUntil && now < keyInfo.blockedUntil
+    
+    if (!isBlocked) {
+      key = apiKeys[currentKeyIndex]
+      break
+    }
+    
+    // Move to next key
+    currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length
+    attempts++
+  }
+  
+  // If all keys are blocked, use current key anyway (will fail but we'll try)
+  if (!key) {
+    key = apiKeys[currentKeyIndex]
+    console.warn(`⚠️ All API keys may be rate limited, using: ${key.substring(0, 10)}...`)
+  }
+  
   return key
+}
+
+// Mark API key as rate limited
+const markKeyAsRateLimited = (key, blockDuration = 16 * 60 * 1000) => {
+  const blockedUntil = Date.now() + blockDuration
+  keyRateLimitMap.set(key, { blockedUntil })
+  console.warn(`🚫 API key rate limited: ${key.substring(0, 10)}... (blocked until ${new Date(blockedUntil).toISOString()})`)
+  
+  // Move to next key
+  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length
+  console.log(`🔄 Rotated to next API key (index: ${currentKeyIndex})`)
+}
+
+// Throttle API calls - ensure 10 seconds between calls
+const throttleApiCall = async () => {
+  const now = Date.now()
+  const timeSinceLastCall = now - lastApiCallTime
+  
+  if (timeSinceLastCall < THROTTLE_DELAY) {
+    const waitTime = THROTTLE_DELAY - timeSinceLastCall
+    console.log(`⏳ Throttling API call - waiting ${waitTime}ms`)
+    await new Promise(resolve => setTimeout(resolve, waitTime))
+  }
+  
+  lastApiCallTime = Date.now()
 }
 
 // Correct API base URL for cricapi.com
@@ -52,12 +139,19 @@ export const clearCache = () => {
 
 // Get cache status
 export const getCacheStatus = () => {
-  const rateLimitInfo = lastRateLimitTime ? {
-    lastRateLimit: new Date(lastRateLimitTime).toISOString(),
-    cooldownRemaining: Math.max(0, RATE_LIMIT_COOLDOWN - (Date.now() - lastRateLimitTime)),
-    cooldownRemainingMinutes: Math.ceil(Math.max(0, RATE_LIMIT_COOLDOWN - (Date.now() - lastRateLimitTime)) / 60000),
-    isInCooldown: (Date.now() - lastRateLimitTime) < RATE_LIMIT_COOLDOWN,
-  } : null
+  // Get rate limit info for all keys
+  const now = Date.now()
+  const keyStatus = apiKeys.map((key, index) => {
+    const keyInfo = keyRateLimitMap.get(key)
+    const isBlocked = keyInfo && keyInfo.blockedUntil && now < keyInfo.blockedUntil
+    return {
+      index,
+      key: key.substring(0, 10) + '...',
+      isBlocked,
+      blockedUntil: keyInfo?.blockedUntil ? new Date(keyInfo.blockedUntil).toISOString() : null,
+      isCurrent: index === currentKeyIndex,
+    }
+  })
 
   return {
     current: {
@@ -74,8 +168,20 @@ export const getCacheStatus = () => {
       cachedMatches: cache.matchDetails.size,
       cacheDuration: `${MATCH_DETAILS_CACHE_DURATION / 60000} minutes`,
     },
+    series: {
+      hasData: !!seriesCache.data,
+      lastFetch: seriesCache.timestamp ? new Date(seriesCache.timestamp).toISOString() : null,
+    },
     isUpdating: cache.isUpdatingCurrent || cache.isUpdatingUpcoming,
-    rateLimit: rateLimitInfo,
+    apiKeys: {
+      total: apiKeys.length,
+      currentIndex: currentKeyIndex,
+      keys: keyStatus,
+    },
+    throttling: {
+      lastCallTime: lastApiCallTime ? new Date(lastApiCallTime).toISOString() : null,
+      throttleDelay: `${THROTTLE_DELAY / 1000}s`,
+    },
   }
 }
 
@@ -136,19 +242,65 @@ const updateCurrentMatchesCache = async () => {
 
   try {
     cache.isUpdatingCurrent = true
-    const apiKey = getApiKey()
+    
+    // Throttle API call
+    await throttleApiCall()
+    
+    let apiKey = getApiKey()
     if (!apiKey) {
       throw new Error('CRICKET_API_KEY is not configured')
     }
 
     console.log('🔄 Updating current matches cache...')
-      const response = await axios.get(`${BASE_URL}/matches`, {
-        params: {
-        apikey: apiKey,
-          offset: 0,
-        },
-        timeout: 30000,
-      })
+    
+    // Try with current key, rotate if rate limited
+    let response = null
+    let lastError = null
+    const maxKeyAttempts = apiKeys.length
+    
+    for (let attempt = 0; attempt < maxKeyAttempts; attempt++) {
+      try {
+        response = await axios.get(`${BASE_URL}/matches`, {
+          params: {
+            apikey: apiKey,
+            offset: 0,
+          },
+          timeout: 30000,
+        })
+        
+        // Success - break out of retry loop
+        break
+      } catch (error) {
+        lastError = error
+        const errorMessage = error.message || error.response?.data?.reason || ''
+        const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                              errorMessage.toLowerCase().includes('limit') ||
+                              errorMessage.toLowerCase().includes('exceeded') ||
+                              error.response?.status === 429
+        
+        if (isRateLimited) {
+          console.warn(`⚠️ API key rate limited: ${apiKey.substring(0, 10)}...`)
+          markKeyAsRateLimited(apiKey)
+          
+          // Get next key
+          apiKey = getApiKey()
+          if (!apiKey) {
+            throw new Error('All API keys are rate limited')
+          }
+          
+          // Wait a bit before retrying with next key
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          continue
+        }
+        
+        // Non-rate-limit error - throw it
+        throw error
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to fetch matches after trying all keys')
+    }
       
       if (response.data && response.data.status === 'success' && response.data.data && Array.isArray(response.data.data)) {
         const allMatches = response.data.data
@@ -165,49 +317,51 @@ const updateCurrentMatchesCache = async () => {
           return dateB - dateA
         }).slice(0, 10)
 
-      cache.current = { data: sortedLive }
-      cache.lastFetch.current = Date.now()
-      console.log(`✅ Cache updated: ${sortedLive.length} live/recent matches`)
+        // Store in cache
+        cache.current = { data: sortedLive }
+        cache.lastFetch.current = Date.now()
+        console.log(`✅ Cache updated: ${sortedLive.length} live/recent matches`)
         return { data: sortedLive }
       }
       
-    // Handle rate limiting
+      // Handle API failure response
       if (response.data && response.data.status === 'failure') {
-      const reason = response.data.reason || ''
-      const isRateLimited = reason.toLowerCase().includes('blocked') || 
-                            reason.toLowerCase().includes('limit') ||
-                            reason.toLowerCase().includes('exceeded')
+        const reason = response.data.reason || ''
+        const isRateLimited = reason.toLowerCase().includes('blocked') || 
+                              reason.toLowerCase().includes('limit') ||
+                              reason.toLowerCase().includes('exceeded')
+        
+        if (isRateLimited) {
+          console.warn('⚠️ API rate limited during cache update:', reason)
+          markKeyAsRateLimited(apiKey)
+          // Keep existing cache
+          return cache.current || { data: [] }
+        }
+        console.error('❌ API returned failure:', reason)
+      }
+
+      return cache.current || { data: [] }
+    } catch (error) {
+      const errorMessage = error.message || error.response?.data?.reason || ''
+      const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                            errorMessage.toLowerCase().includes('limit') ||
+                            errorMessage.toLowerCase().includes('exceeded') ||
+                            error.response?.status === 429
       
       if (isRateLimited) {
-        console.warn('⚠️ API rate limited during cache update:', reason)
-        // Track rate limit time
-        lastRateLimitTime = Date.now()
-        // Keep existing cache
+        console.warn('⚠️ Rate limited during cache update, keeping existing cache')
+        if (apiKey) {
+          markKeyAsRateLimited(apiKey)
+        }
         return cache.current || { data: [] }
       }
-      console.error('❌ API returned failure:', reason)
-    }
-
-    return cache.current || { data: [] }
-  } catch (error) {
-    const errorMessage = error.message || error.response?.data?.reason || ''
-    const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
-                          errorMessage.toLowerCase().includes('limit') ||
-                          errorMessage.toLowerCase().includes('exceeded')
-    
-    if (isRateLimited) {
-      console.warn('⚠️ Rate limited during cache update, keeping existing cache')
-      // Track rate limit time
-      lastRateLimitTime = Date.now()
+      
+      console.error('❌ Error updating current matches cache:', error.message)
       return cache.current || { data: [] }
+    } finally {
+      cache.isUpdatingCurrent = false
     }
-    
-    console.error('❌ Error updating current matches cache:', error.message)
-    return cache.current || { data: [] }
-  } finally {
-    cache.isUpdatingCurrent = false
   }
-}
 
 /**
  * Internal function to fetch and update upcoming matches cache
@@ -220,75 +374,121 @@ const updateUpcomingMatchesCache = async () => {
 
   try {
     cache.isUpdatingUpcoming = true
-    const apiKey = getApiKey()
+    
+    // Throttle API call
+    await throttleApiCall()
+    
+    let apiKey = getApiKey()
     if (!apiKey) {
       throw new Error('CRICKET_API_KEY is not configured')
     }
 
     console.log('🔄 Updating upcoming matches cache...')
-      const response = await axios.get(`${BASE_URL}/matches`, {
-        params: {
-        apikey: apiKey,
-          offset: 0,
-        },
-        timeout: 30000,
-      })
+    
+    // Try with current key, rotate if rate limited
+    let response = null
+    let lastError = null
+    const maxKeyAttempts = apiKeys.length
+    
+    for (let attempt = 0; attempt < maxKeyAttempts; attempt++) {
+      try {
+        response = await axios.get(`${BASE_URL}/matches`, {
+          params: {
+            apikey: apiKey,
+            offset: 0,
+          },
+          timeout: 30000,
+        })
+        
+        // Success - break out of retry loop
+        break
+      } catch (error) {
+        lastError = error
+        const errorMessage = error.message || error.response?.data?.reason || ''
+        const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                              errorMessage.toLowerCase().includes('limit') ||
+                              errorMessage.toLowerCase().includes('exceeded') ||
+                              error.response?.status === 429
+        
+        if (isRateLimited) {
+          console.warn(`⚠️ API key rate limited: ${apiKey.substring(0, 10)}...`)
+          markKeyAsRateLimited(apiKey)
+          
+          // Get next key
+          apiKey = getApiKey()
+          if (!apiKey) {
+            throw new Error('All API keys are rate limited')
+          }
+          
+          // Wait a bit before retrying with next key
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          continue
+        }
+        
+        // Non-rate-limit error - throw it
+        throw error
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to fetch matches after trying all keys')
+    }
       
       if (response.data && response.data.status === 'success' && response.data.data && Array.isArray(response.data.data)) {
         const allMatches = response.data.data
         const upcomingMatches = allMatches.filter(match => 
           match.matchStarted === false
-      ).slice(0, 20)
+        ).slice(0, 20)
 
-      cache.upcoming = { data: upcomingMatches }
-      cache.lastFetch.upcoming = Date.now()
-      console.log(`✅ Cache updated: ${upcomingMatches.length} upcoming matches`)
+        // Store in cache
+        cache.upcoming = { data: upcomingMatches }
+        cache.lastFetch.upcoming = Date.now()
+        console.log(`✅ Cache updated: ${upcomingMatches.length} upcoming matches`)
         return { data: upcomingMatches }
       }
       
-    // Handle rate limiting
+      // Handle API failure response
       if (response.data && response.data.status === 'failure') {
-      const reason = response.data.reason || ''
-      const isRateLimited = reason.toLowerCase().includes('blocked') || 
-                            reason.toLowerCase().includes('limit') ||
-                            reason.toLowerCase().includes('exceeded')
+        const reason = response.data.reason || ''
+        const isRateLimited = reason.toLowerCase().includes('blocked') || 
+                              reason.toLowerCase().includes('limit') ||
+                              reason.toLowerCase().includes('exceeded')
+        
+        if (isRateLimited) {
+          console.warn('⚠️ API rate limited during cache update:', reason)
+          markKeyAsRateLimited(apiKey)
+          return cache.upcoming || { data: [] }
+        }
+        console.error('❌ API returned failure:', reason)
+      }
+
+      return cache.upcoming || { data: [] }
+    } catch (error) {
+      const errorMessage = error.message || error.response?.data?.reason || ''
+      const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                            errorMessage.toLowerCase().includes('limit') ||
+                            errorMessage.toLowerCase().includes('exceeded') ||
+                            error.response?.status === 429
       
       if (isRateLimited) {
-        console.warn('⚠️ API rate limited during cache update:', reason)
-        // Track rate limit time
-        lastRateLimitTime = Date.now()
+        console.warn('⚠️ Rate limited during cache update, keeping existing cache')
+        if (apiKey) {
+          markKeyAsRateLimited(apiKey)
+        }
         return cache.upcoming || { data: [] }
       }
-      console.error('❌ API returned failure:', reason)
-    }
-
-    return cache.upcoming || { data: [] }
-  } catch (error) {
-    const errorMessage = error.message || error.response?.data?.reason || ''
-    const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
-                          errorMessage.toLowerCase().includes('limit') ||
-                          errorMessage.toLowerCase().includes('exceeded')
-    
-    if (isRateLimited) {
-      console.warn('⚠️ Rate limited during cache update, keeping existing cache')
-      // Track rate limit time
-      lastRateLimitTime = Date.now()
+      
+      console.error('❌ Error updating upcoming matches cache:', error.message)
       return cache.upcoming || { data: [] }
+    } finally {
+      cache.isUpdatingUpcoming = false
     }
-    
-    console.error('❌ Error updating upcoming matches cache:', error.message)
-    return cache.upcoming || { data: [] }
-  } finally {
-    cache.isUpdatingUpcoming = false
   }
-}
 
 /**
  * Background cache updater - runs periodically
  */
 let cacheUpdateInterval = null
-let lastRateLimitTime = null
-const RATE_LIMIT_COOLDOWN = 16 * 60 * 1000 // 16 minutes (slightly more than 15 min block)
 
 export const startCacheUpdater = () => {
   if (cacheUpdateInterval) {
@@ -308,13 +508,26 @@ export const startCacheUpdater = () => {
 
   // Set up periodic updates
   cacheUpdateInterval = setInterval(async () => {
-    // Skip update if we're in rate limit cooldown period
-    if (lastRateLimitTime && (Date.now() - lastRateLimitTime) < RATE_LIMIT_COOLDOWN) {
-      const remainingMinutes = Math.ceil((RATE_LIMIT_COOLDOWN - (Date.now() - lastRateLimitTime)) / 60000)
-      console.log(`⏸️ Skipping cache update - rate limit cooldown (${remainingMinutes} min remaining)`)
+    // Check if all keys are blocked
+    const now = Date.now()
+    const allKeysBlocked = apiKeys.every(key => {
+      const keyInfo = keyRateLimitMap.get(key)
+      return keyInfo && keyInfo.blockedUntil && now < keyInfo.blockedUntil
+    })
+    
+    if (allKeysBlocked) {
+      const firstBlockedKey = apiKeys.find(key => {
+        const keyInfo = keyRateLimitMap.get(key)
+        return keyInfo && keyInfo.blockedUntil && now < keyInfo.blockedUntil
+      })
+      const keyInfo = keyRateLimitMap.get(firstBlockedKey)
+      const remainingMs = keyInfo.blockedUntil - now
+      const remainingMinutes = Math.ceil(remainingMs / 60000)
+      console.log(`⏸️ Skipping cache update - all keys blocked (${remainingMinutes} min remaining)`)
       return
     }
 
+    // Update cache (will handle key rotation automatically)
     await Promise.all([
       updateCurrentMatchesCache(),
       updateUpcomingMatchesCache(),
@@ -373,37 +586,74 @@ export const getUpcomingMatches = async () => {
  */
 export const getMatchDetails = async (matchId) => {
   try {
-    // Check cache first
+    // Check cache first - ALWAYS return from cache if available
     const cached = cache.matchDetails.get(matchId)
     if (cached && (Date.now() - cached.timestamp) < MATCH_DETAILS_CACHE_DURATION) {
       console.log('✅ Match details served from cache:', matchId)
       return cached.data
     }
     
-    const apiKey = getApiKey()
+    // If cache expired but exists, return it anyway (stale cache is better than no data)
+    if (cached) {
+      console.log('⚠️ Cache expired but returning stale data:', matchId)
+      return cached.data
+    }
+    
+    // Throttle API call
+    await throttleApiCall()
+    
+    let apiKey = getApiKey()
     if (!apiKey) {
       throw new Error('CRICKET_API_KEY is not configured')
     }
     
-    // Check if we're in rate limit cooldown
-    if (lastRateLimitTime && (Date.now() - lastRateLimitTime) < RATE_LIMIT_COOLDOWN) {
-      const cooldownRemaining = Math.ceil((RATE_LIMIT_COOLDOWN - (Date.now() - lastRateLimitTime)) / 60000)
-      console.log(`⚠️ API in cooldown, returning cached data if available (${cooldownRemaining} min remaining)`)
-      if (cached) {
-        return cached.data
-      }
-      throw new Error(`API rate limited. Please try again in ${cooldownRemaining} minutes.`)
-    }
-    
     console.log('🔄 Fetching match details from API:', matchId)
     
-    // Fetch match info
-    const matchInfoResponse = await cricketAPI.get(`/match_info`, {
-      params: {
-        apikey: apiKey,
-        id: matchId,
-      },
-    })
+    // Helper function to make API call with key rotation
+    const makeApiCall = async (url, params) => {
+      let currentKey = apiKey
+      let lastError = null
+      const maxKeyAttempts = apiKeys.length
+      
+      for (let attempt = 0; attempt < maxKeyAttempts; attempt++) {
+        try {
+          const response = await cricketAPI.get(url, {
+            params: { ...params, apikey: currentKey },
+          })
+          return response
+        } catch (error) {
+          lastError = error
+          const errorMessage = error.message || error.response?.data?.reason || ''
+          const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                                errorMessage.toLowerCase().includes('limit') ||
+                                errorMessage.toLowerCase().includes('exceeded') ||
+                                error.response?.status === 429
+          
+          if (isRateLimited) {
+            console.warn(`⚠️ API key rate limited: ${currentKey.substring(0, 10)}...`)
+            markKeyAsRateLimited(currentKey)
+            
+            // Get next key
+            currentKey = getApiKey()
+            if (!currentKey) {
+              throw new Error('All API keys are rate limited')
+            }
+            
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, 1000))
+            continue
+          }
+          
+          // Non-rate-limit error - throw it
+          throw error
+        }
+      }
+      
+      throw lastError || new Error('Failed to fetch after trying all keys')
+    }
+    
+    // Fetch match info with key rotation
+    const matchInfoResponse = await makeApiCall(`/match_info`, { id: matchId })
     
     let matchData = matchInfoResponse.data
     
@@ -448,13 +698,11 @@ export const getMatchDetails = async (matchId) => {
       let squadResponseData = null
       if (matchData.data.hasSquad) {
         try {
+          // Throttle before next API call
+          await throttleApiCall()
+          
           // Try to fetch squad using match_squad endpoint if available
-          const squadResponse = await cricketAPI.get(`/match_squad`, {
-            params: {
-              apikey: apiKey,
-              id: matchId,
-            },
-          })
+          const squadResponse = await makeApiCall(`/match_squad`, { id: matchId })
           if (squadResponse.data && Array.isArray(squadResponse.data.data)) {
             squadResponseData = squadResponse.data
             squadData = extractSquadData(squadResponse.data)
@@ -474,12 +722,10 @@ export const getMatchDetails = async (matchId) => {
       // Try to fetch detailed scorecard data for player information
       let scorecardData = null
       try {
-        const scorecardResponse = await cricketAPI.get(`/match_scorecard`, {
-          params: {
-            apikey: apiKey,
-            id: matchId,
-          },
-        })
+        // Throttle before next API call
+        await throttleApiCall()
+        
+        const scorecardResponse = await makeApiCall(`/match_scorecard`, { id: matchId })
         if (scorecardResponse.data && scorecardResponse.data.data) {
           scorecardData = scorecardResponse.data
           console.log('✅ Scorecard data fetched')
@@ -491,12 +737,10 @@ export const getMatchDetails = async (matchId) => {
       // Try alternative endpoint: matchScorecard (without underscore)
       if (!scorecardData) {
         try {
-          const altScorecardResponse = await cricketAPI.get(`/matchScorecard`, {
-            params: {
-              apikey: apiKey,
-              id: matchId,
-            },
-          })
+          // Throttle before next API call
+          await throttleApiCall()
+          
+          const altScorecardResponse = await makeApiCall(`/matchScorecard`, { id: matchId })
           if (altScorecardResponse.data && altScorecardResponse.data.data) {
             scorecardData = altScorecardResponse.data
             console.log('✅ Alternative scorecard data fetched')
@@ -800,7 +1044,7 @@ export const getMatchDetails = async (matchId) => {
         team2PlayingXICount: enhancedData.data.team2PlayingXI.length,
       })
       
-      // Cache the enhanced data
+      // ALWAYS store in cache (even if enhanced or not)
       cache.matchDetails.set(matchId, {
         data: enhancedData,
         timestamp: Date.now(),
@@ -810,17 +1054,18 @@ export const getMatchDetails = async (matchId) => {
       return enhancedData
     }
     
-    // Cache even if no enhanced data
+    // Cache even if no enhanced data - ALWAYS cache
     cache.matchDetails.set(matchId, {
       data: matchData,
       timestamp: Date.now(),
     })
+    console.log('💾 Match details cached (basic):', matchId)
     
     return matchData
   } catch (error) {
     console.error('Error fetching match details:', error.message)
     
-    // If we have cached data, return it even on error
+    // ALWAYS return cached data if available (even if expired)
     const cached = cache.matchDetails.get(matchId)
     if (cached) {
       console.log('⚠️ Error occurred, returning cached data:', matchId)
@@ -832,29 +1077,88 @@ export const getMatchDetails = async (matchId) => {
 }
 
 /**
- * Get series list
+ * Get series list (with caching)
  */
+const seriesCache = {
+  data: null,
+  timestamp: null,
+  CACHE_DURATION: 5 * 60 * 1000, // 5 minutes
+}
+
 export const getSeriesList = async () => {
   try {
-    const apiKey = getApiKey()
+    // Check cache first
+    if (seriesCache.data && seriesCache.timestamp && 
+        (Date.now() - seriesCache.timestamp) < seriesCache.CACHE_DURATION) {
+      console.log('✅ Series list served from cache')
+      return seriesCache.data
+    }
+    
+    // Throttle API call
+    await throttleApiCall()
+    
+    let apiKey = getApiKey()
     if (!apiKey) {
       throw new Error('CRICKET_API_KEY is not configured')
     }
-    const response = await cricketAPI.get('/series', {
-      params: {
-        apikey: apiKey,
-        offset: 0,
-      },
-    })
     
-    // Check if response is successful
+    // Try with key rotation
+    let response = null
+    let lastError = null
+    const maxKeyAttempts = apiKeys.length
+    
+    for (let attempt = 0; attempt < maxKeyAttempts; attempt++) {
+      try {
+        response = await cricketAPI.get('/series', {
+          params: {
+            apikey: apiKey,
+            offset: 0,
+          },
+        })
+        break
+      } catch (error) {
+        lastError = error
+        const errorMessage = error.message || error.response?.data?.reason || ''
+        const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
+                              errorMessage.toLowerCase().includes('limit') ||
+                              errorMessage.toLowerCase().includes('exceeded') ||
+                              error.response?.status === 429
+        
+        if (isRateLimited) {
+          markKeyAsRateLimited(apiKey)
+          apiKey = getApiKey()
+          if (!apiKey) {
+            throw new Error('All API keys are rate limited')
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          continue
+        }
+        throw error
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to fetch series')
+    }
+    
+    // Store in cache
     if (response.data.status === 'success') {
+      seriesCache.data = response.data
+      seriesCache.timestamp = Date.now()
+      console.log('💾 Series list cached')
       return response.data
     }
     
     return response.data
   } catch (error) {
     console.error('Error fetching series list:', error.message)
+    
+    // Return cached data if available
+    if (seriesCache.data) {
+      console.log('⚠️ Error occurred, returning cached series data')
+      return seriesCache.data
+    }
+    
     throw error
   }
 }

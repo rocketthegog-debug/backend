@@ -395,5 +395,126 @@ router.put('/users/:userId/restrict', async (req, res) => {
   }
 })
 
+// Get loss tracking for all users (admin only)
+router.get('/loss-tracking', async (req, res) => {
+  try {
+    const { adminUserId } = req.query
+
+    // Verify admin
+    if (adminUserId) {
+      const admin = await User.findOne({ phone: adminUserId, isAdmin: true })
+      if (!admin) {
+        return res.status(403).json({
+          success: false,
+          message: 'Admin access required',
+        })
+      }
+    }
+
+    // Get all users with their recharge and earnings data
+    const users = await User.find({ isAdmin: false }).select('name phone walletBalance createdAt')
+
+    const lossTracking = await Promise.all(
+      users.map(async (user) => {
+        // Calculate total recharged (CP - Cost Price)
+        const totalRecharged = await Transaction.aggregate([
+          {
+            $match: {
+              userId: user.phone,
+              paymentType: 'recharge',
+              status: 'completed',
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: '$amount' },
+            },
+          },
+        ])
+
+        // Calculate total earnings (Loss - what we gave them for free)
+        const totalEarnings = await Transaction.aggregate([
+          {
+            $match: {
+              userId: user.phone,
+              paymentType: 'click-earn',
+              status: 'completed',
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: '$amount' },
+            },
+          },
+        ])
+
+        // Calculate total withdrawn
+        const totalWithdrawn = await Transaction.aggregate([
+          {
+            $match: {
+              userId: user.phone,
+              paymentType: 'withdrawal',
+              status: 'completed',
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: '$amount' },
+            },
+          },
+        ])
+
+        const cp = totalRecharged.length > 0 ? totalRecharged[0].total : 0
+        const loss = totalEarnings.length > 0 ? totalEarnings[0].total : 0
+        const totalWithdrawnAmount = totalWithdrawn.length > 0 ? totalWithdrawn[0].total : 0
+
+        // Net loss = Earnings given (what we lost)
+        const netLoss = loss
+
+        return {
+          userId: user.phone,
+          userName: user.name,
+          cp: parseFloat(cp.toFixed(2)),
+          loss: parseFloat(loss.toFixed(2)),
+          totalWithdrawn: parseFloat(totalWithdrawnAmount.toFixed(2)),
+          netLoss: parseFloat(netLoss.toFixed(2)),
+          walletBalance: parseFloat(user.walletBalance.toFixed(2)),
+          joinedDate: user.createdAt,
+        }
+      })
+    )
+
+    // Calculate total loss across all users
+    const totalCP = lossTracking.reduce((sum, user) => sum + user.cp, 0)
+    const totalLoss = lossTracking.reduce((sum, user) => sum + user.loss, 0)
+    const totalWithdrawn = lossTracking.reduce((sum, user) => sum + user.totalWithdrawn, 0)
+    const totalNetLoss = lossTracking.reduce((sum, user) => sum + user.netLoss, 0)
+
+    res.json({
+      success: true,
+      data: {
+        users: lossTracking.sort((a, b) => b.netLoss - a.netLoss), // Sort by highest loss
+        summary: {
+          totalCP: parseFloat(totalCP.toFixed(2)),
+          totalLoss: parseFloat(totalLoss.toFixed(2)),
+          totalWithdrawn: parseFloat(totalWithdrawn.toFixed(2)),
+          totalNetLoss: parseFloat(totalNetLoss.toFixed(2)),
+          totalUsers: lossTracking.length,
+        },
+      },
+    })
+  } catch (error) {
+    console.error('Error in /admin/loss-tracking route:', error)
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch loss tracking',
+      error: error.message,
+    })
+  }
+})
+
 export default router
 

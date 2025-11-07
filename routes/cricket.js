@@ -120,24 +120,24 @@ router.get('/matches', async (req, res) => {
     res.json({
       success: true,
       data: {
-        live: Array.isArray(matches.live) 
-          ? matches.live 
-          : Array.isArray(matches.live?.data) 
-          ? matches.live.data 
-          : Array.isArray(matches.live?.matches)
-          ? matches.live.matches
-          : Array.isArray(matches.live?.results)
-          ? matches.live.results
-          : [],
-        upcoming: Array.isArray(matches.upcoming)
-          ? matches.upcoming
-          : Array.isArray(matches.upcoming?.data)
-          ? matches.upcoming.data
-          : Array.isArray(matches.upcoming?.matches)
-          ? matches.upcoming.matches
-          : Array.isArray(matches.upcoming?.results)
-          ? matches.upcoming.results
-          : [],
+      live: Array.isArray(matches.live) 
+        ? matches.live 
+        : Array.isArray(matches.live?.data) 
+        ? matches.live.data 
+        : Array.isArray(matches.live?.matches)
+        ? matches.live.matches
+        : Array.isArray(matches.live?.results)
+        ? matches.live.results
+        : [],
+      upcoming: Array.isArray(matches.upcoming)
+        ? matches.upcoming
+        : Array.isArray(matches.upcoming?.data)
+        ? matches.upcoming.data
+        : Array.isArray(matches.upcoming?.matches)
+        ? matches.upcoming.matches
+        : Array.isArray(matches.upcoming?.results)
+        ? matches.upcoming.results
+        : [],
       },
     })
   } catch (error) {

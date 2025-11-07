@@ -4,7 +4,7 @@ import Transaction from '../models/Transaction.js'
 
 const router = express.Router()
 
-// Get wallet balance
+// Get wallet balance and withdrawable balance
 router.get('/balance/:userId', async (req, res) => {
   try {
     const { userId } = req.params
@@ -17,10 +17,48 @@ router.get('/balance/:userId', async (req, res) => {
       })
     }
 
+    // Calculate withdrawable balance (only from recharges, excluding earnings)
+    const totalRecharged = await Transaction.aggregate([
+      {
+        $match: {
+          userId,
+          paymentType: 'recharge',
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ])
+
+    const totalWithdrawn = await Transaction.aggregate([
+      {
+        $match: {
+          userId,
+          paymentType: 'withdrawal',
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ])
+
+    const totalRechargedAmount = totalRecharged.length > 0 ? totalRecharged[0].total : 0
+    const totalWithdrawnAmount = totalWithdrawn.length > 0 ? totalWithdrawn[0].total : 0
+    const withdrawableBalance = Math.max(0, totalRechargedAmount - totalWithdrawnAmount)
+
     res.json({
       success: true,
       data: {
         balance: user.walletBalance,
+        withdrawableBalance,
       },
     })
   } catch (error) {
@@ -70,28 +108,102 @@ router.post('/withdraw', async (req, res) => {
       })
     }
 
-    // Check if user has sufficient balance
-    if (user.walletBalance < amount) {
+    // Check if payment method (bank account) is added
+    const PaymentMethod = (await import('../models/PaymentMethod.js')).default
+    const paymentMethod = await PaymentMethod.findOne({ userId })
+    
+    if (!paymentMethod) {
       return res.status(400).json({
         success: false,
-        message: 'Insufficient balance',
+        message: 'Please add your bank account details before withdrawing.',
+      })
+    }
+
+    // Calculate withdrawable balance (only from recharges, excluding earnings)
+    // Withdrawable = Total recharged - Total withdrawn
+    const totalRecharged = await Transaction.aggregate([
+      {
+        $match: {
+          userId,
+          paymentType: 'recharge',
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ])
+
+    const totalWithdrawn = await Transaction.aggregate([
+      {
+        $match: {
+          userId,
+          paymentType: 'withdrawal',
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ])
+
+    const totalRechargedAmount = totalRecharged.length > 0 ? totalRecharged[0].total : 0
+    const totalWithdrawnAmount = totalWithdrawn.length > 0 ? totalWithdrawn[0].total : 0
+    const withdrawableBalance = totalRechargedAmount - totalWithdrawnAmount
+
+    // Calculate GST (18% on withdrawal amount)
+    const gstRate = 0.18
+    const gstAmount = amount * gstRate
+    const totalDeduction = amount + gstAmount // Amount + GST
+    const netAmountToUser = amount - gstAmount // User receives amount minus GST
+
+    // Calculate maximum withdrawable amount after GST
+    // If user has ₹100 withdrawable, they can request ₹100
+    // GST = ₹100 * 0.18 = ₹18
+    // Total deduction = ₹100 + ₹18 = ₹118
+    // But we need to check: requested amount + GST <= withdrawable balance
+    const maxWithdrawableAfterGST = Math.floor(withdrawableBalance / (1 + gstRate))
+    
+    // Check if user has sufficient withdrawable balance (only from recharges)
+    // User needs to have enough to cover withdrawal amount + GST
+    if (totalDeduction > withdrawableBalance) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient withdrawable balance. You can withdraw up to ₹${maxWithdrawableAfterGST} (after 18% GST deduction).`,
+        withdrawableBalance,
+        maxWithdrawableAfterGST,
       })
     }
 
     // Create withdrawal transaction with "processing" status
+    // Store both gross amount (what user requested) and net amount (after GST)
     const transaction = new Transaction({
       userId,
-      amount,
+      amount: totalDeduction, // Store total deduction (amount + GST) for admin
       paymentType: 'withdrawal',
       status: 'processing', // Goes directly to processing for admin review
+      // Store additional info in a metadata field (we'll add this to schema if needed)
+      // For now, we'll calculate GST on admin side
     })
 
     await transaction.save()
 
     res.json({
       success: true,
-      message: 'Withdrawal request submitted successfully. It will be processed by admin.',
-      data: transaction,
+      message: `Withdrawal request submitted successfully. Amount: ₹${amount} (GST ₹${gstAmount.toFixed(2)} will be deducted). It will be processed by admin.`,
+      data: {
+        ...transaction.toObject(),
+        requestedAmount: amount,
+        gstAmount: gstAmount.toFixed(2),
+        netAmount: netAmountToUser.toFixed(2),
+        totalDeduction: totalDeduction.toFixed(2),
+      },
     })
   } catch (error) {
     console.error('Error in /withdraw route:', error)

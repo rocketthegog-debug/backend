@@ -2,6 +2,12 @@ import express from 'express'
 import mongoose from 'mongoose'
 import cors from 'cors'
 import dotenv from 'dotenv'
+import Transaction from './models/Transaction.js'
+
+// Load environment variables FIRST before importing services
+dotenv.config()
+
+// Now import services (they will have access to process.env)
 import cricketRoutes from './routes/cricket.js'
 import authRoutes from './routes/auth.js'
 import walletRoutes from './routes/wallet.js'
@@ -9,10 +15,10 @@ import adminRoutes from './routes/admin.js'
 import paymentMethodsRoutes from './routes/paymentMethods.js'
 import earningsRoutes from './routes/earnings.js'
 import referralRoutes from './routes/referral.js'
-import Transaction from './models/Transaction.js'
-import { startCacheUpdater } from './services/cricketService.js'
+import { startCacheUpdater, reinitializeApiKeys } from './services/cricketService.js'
 
-dotenv.config()
+// Re-initialize API keys after dotenv.config() to ensure they're loaded
+reinitializeApiKeys()
 
 const app = express()
 
