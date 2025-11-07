@@ -32,14 +32,31 @@ app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 app.use(express.json())
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
+// MongoDB Connection with serverless-optimized options
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+  socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+  connectTimeoutMS: 10000, // Give up initial connection after 10s
+  maxPoolSize: 10, // Maintain up to 10 socket connections
+  minPoolSize: 1, // Maintain at least 1 socket connection
+  maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
+  bufferCommands: false, // Disable mongoose buffering
+  bufferMaxEntries: 0, // Disable mongoose buffering
+}
+
+mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
   .then(() => {
     console.log('✅ MongoDB Connected')
     // Start cache updater after MongoDB connection
-    startCacheUpdater()
+    if (process.env.VERCEL !== '1') {
+      startCacheUpdater()
+    }
   })
-  .catch((err) => console.error('❌ MongoDB Connection Error:', err))
+  .catch((err) => {
+    console.error('❌ MongoDB Connection Error:', err)
+    // In serverless, connection errors are expected on cold starts
+    // The connection will be retried on next request
+  })
 
 // Routes
 app.use('/api/cricket', cricketRoutes)
@@ -50,9 +67,32 @@ app.use('/api/payment-methods', paymentMethodsRoutes)
 app.use('/api/earnings', earningsRoutes)
 app.use('/api/referral', referralRoutes)
 
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'CrickBuzz API is running',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      cricket: '/api/cricket',
+      auth: '/api/auth',
+      wallet: '/api/wallet',
+      earnings: '/api/earnings',
+      referral: '/api/referral',
+      admin: '/api/admin'
+    }
+  })
+})
+
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'CrickBuzz API is running' })
+  res.json({ 
+    status: 'OK', 
+    message: 'CrickBuzz API is running',
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+  })
 })
 
 // Cleanup job: Delete transactions that are not confirmed/processed within 5 days
