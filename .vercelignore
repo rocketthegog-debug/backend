@@ -1,0 +1,22 @@
+# Vercel deployment files
+.vercel
+.vercelignore
+
+# Environment files
+.env.local
+.env.production
+
+# Logs
+*.log
+server.log
+
+# Dependencies
+node_modules
+
+# Test files
+test-endpoints.js
+TEST_RESULTS.md
+
+# Scripts (not needed in production)
+scripts/
+
