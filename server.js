@@ -25,6 +25,71 @@ const corsOptions = {
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
 }
 
+// MongoDB Connection with serverless-optimized options
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 15000, // Increased timeout for serverless (15s)
+  socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+  connectTimeoutMS: 15000, // Give up initial connection after 15s
+  maxPoolSize: 10, // Maintain up to 10 socket connections
+  minPoolSize: 0, // Allow 0 connections for serverless (connections created on demand)
+  maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
+  retryWrites: true,
+  w: 'majority',
+  // Enable buffering for serverless - Mongoose will queue operations until connected
+  bufferCommands: true,
+  bufferMaxEntries: 0 // Unlimited buffering
+}
+
+// Connection state management for serverless
+let isConnecting = false
+let connectionPromise = null
+
+const connectToMongoDB = async () => {
+  // If already connected, return
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection
+  }
+
+  // If already connecting, wait for that connection
+  if (isConnecting && connectionPromise) {
+    return connectionPromise
+  }
+
+  // Start new connection
+  isConnecting = true
+  connectionPromise = mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
+    .then(() => {
+      console.log('✅ MongoDB Connected')
+      isConnecting = false
+      return mongoose.connection
+    })
+    .catch((err) => {
+      console.error('❌ MongoDB Connection Error:', err.message)
+      isConnecting = false
+      connectionPromise = null
+      // Don't throw - let Mongoose buffer commands
+      return mongoose.connection
+    })
+
+  return connectionPromise
+}
+
+// Initial connection attempt (non-blocking for serverless)
+if (process.env.VERCEL !== '1') {
+  // In local dev, connect immediately
+  connectToMongoDB()
+    .then(async () => {
+      startCacheUpdater()
+      await cleanupOldTransactions()
+    })
+    .catch(() => {
+      // Connection will be retried on first request
+    })
+} else {
+  // On Vercel, connection will be established on first request
+  // Mongoose will buffer commands until connection is ready
+}
+
 // Middleware
 app.use(cors(corsOptions))
 
@@ -32,35 +97,24 @@ app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 app.use(express.json())
 
-// MongoDB Connection with serverless-optimized options
-const mongooseOptions = {
-  serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
-  socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
-  connectTimeoutMS: 10000, // Give up initial connection after 10s
-  maxPoolSize: 10, // Maintain up to 10 socket connections
-  minPoolSize: 1, // Maintain at least 1 socket connection
-  maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
-}
+// Middleware to ensure MongoDB connection before handling requests (for serverless)
+app.use(async (req, res, next) => {
+  // Skip connection check for health endpoint
+  if (req.path === '/api/health' || req.path === '/') {
+    return next()
+  }
 
-// Configure mongoose to not buffer commands (for serverless)
-// This prevents Mongoose from buffering commands when connection is not ready
-mongoose.set('bufferCommands', false)
-
-mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
-  .then(async () => {
-    console.log('✅ MongoDB Connected')
-    // Start cache updater after MongoDB connection
-    if (process.env.VERCEL !== '1') {
-      startCacheUpdater()
-      // Run cleanup after connection is established
-      await cleanupOldTransactions()
+  // Ensure MongoDB is connected before processing request
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      await connectToMongoDB()
     }
-  })
-  .catch((err) => {
-    console.error('❌ MongoDB Connection Error:', err)
-    // In serverless, connection errors are expected on cold starts
-    // The connection will be retried on next request
-  })
+  } catch (error) {
+    console.error('MongoDB connection failed in middleware:', error.message)
+    // Continue anyway - Mongoose will buffer commands if connection fails
+  }
+  next()
+})
 
 // Routes
 app.use('/api/cricket', cricketRoutes)
