@@ -43,8 +43,8 @@ const mongooseOptions = {
 }
 
 // Configure mongoose to not buffer commands (for serverless)
+// This prevents Mongoose from buffering commands when connection is not ready
 mongoose.set('bufferCommands', false)
-mongoose.set('bufferMaxEntries', 0)
 
 mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
   .then(async () => {
