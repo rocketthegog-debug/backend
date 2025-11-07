@@ -105,6 +105,22 @@ router.get('/matches', async (req, res) => {
     const matches = await getAllMatches()
     const cacheStatus = getCacheStatus()
     
+    // Debug logging
+    console.log('📤 /matches endpoint - Raw matches data:', {
+      liveType: Array.isArray(matches.live) ? 'array' : typeof matches.live,
+      liveLength: Array.isArray(matches.live) ? matches.live.length : 'not array',
+      upcomingType: Array.isArray(matches.upcoming) ? 'array' : typeof matches.upcoming,
+      upcomingLength: Array.isArray(matches.upcoming) ? matches.upcoming.length : 'not array',
+      firstLiveMatch: matches.live?.[0] || null,
+      firstUpcomingMatch: matches.upcoming?.[0] || null,
+      cacheStatus: {
+        currentHasData: cacheStatus.current.hasData,
+        currentDataLength: cacheStatus.current.dataLength,
+        upcomingHasData: cacheStatus.upcoming.hasData,
+        upcomingDataLength: cacheStatus.upcoming.dataLength,
+      }
+    })
+    
     // Set cache headers for Vercel edge caching (30 seconds)
     setCacheHeaders(res, CACHE_DURATIONS.CRICKET_MATCHES)
     
@@ -113,6 +129,7 @@ router.get('/matches', async (req, res) => {
     
     // If no data and rate limited, include rate limit info
     if (!hasData && cacheStatus.rateLimit?.isInCooldown) {
+      console.log('⚠️ No data and rate limited')
       return res.json({
         success: true,
         data: {
@@ -124,27 +141,48 @@ router.get('/matches', async (req, res) => {
       })
     }
     
+    // Extract arrays - matches.live and matches.upcoming should already be arrays from getAllMatches
+    const liveArray = Array.isArray(matches.live) 
+      ? matches.live 
+      : Array.isArray(matches.live?.data) 
+      ? matches.live.data 
+      : Array.isArray(matches.live?.matches)
+      ? matches.live.matches
+      : Array.isArray(matches.live?.results)
+      ? matches.live.results
+      : []
+    
+    const upcomingArray = Array.isArray(matches.upcoming)
+      ? matches.upcoming
+      : Array.isArray(matches.upcoming?.data)
+      ? matches.upcoming.data
+      : Array.isArray(matches.upcoming?.matches)
+      ? matches.upcoming.matches
+      : Array.isArray(matches.upcoming?.results)
+      ? matches.upcoming.results
+      : []
+    
+    console.log('📤 /matches endpoint - Sending response:', {
+      liveCount: liveArray.length,
+      upcomingCount: upcomingArray.length,
+      firstLiveMatchSample: liveArray[0] ? {
+        id: liveArray[0].id,
+        name: liveArray[0].name,
+        teams: liveArray[0].teams,
+        score: liveArray[0].score
+      } : null,
+      firstUpcomingMatchSample: upcomingArray[0] ? {
+        id: upcomingArray[0].id,
+        name: upcomingArray[0].name,
+        teams: upcomingArray[0].teams
+      } : null
+    })
+    
     res.json({
       success: true,
       data: {
-      live: Array.isArray(matches.live) 
-        ? matches.live 
-        : Array.isArray(matches.live?.data) 
-        ? matches.live.data 
-        : Array.isArray(matches.live?.matches)
-        ? matches.live.matches
-        : Array.isArray(matches.live?.results)
-        ? matches.live.results
-        : [],
-      upcoming: Array.isArray(matches.upcoming)
-        ? matches.upcoming
-        : Array.isArray(matches.upcoming?.data)
-        ? matches.upcoming.data
-        : Array.isArray(matches.upcoming?.matches)
-        ? matches.upcoming.matches
-        : Array.isArray(matches.upcoming?.results)
-        ? matches.upcoming.results
-        : [],
+        live: liveArray,
+        upcoming: upcomingArray,
       },
     })
   } catch (error) {
