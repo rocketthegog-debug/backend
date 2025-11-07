@@ -34,11 +34,12 @@ const mongooseOptions = {
   minPoolSize: 0, // Allow 0 connections for serverless (connections created on demand)
   maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
   retryWrites: true,
-  w: 'majority',
-  // Enable buffering for serverless - Mongoose will queue operations until connected
-  bufferCommands: true,
-  bufferMaxEntries: 0 // Unlimited buffering
+  w: 'majority'
 }
+
+// Enable buffering for serverless - Mongoose will queue operations until connected
+// This is set globally, not in connection options
+mongoose.set('bufferCommands', true)
 
 // Connection state management for serverless
 let isConnecting = false
