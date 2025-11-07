@@ -464,12 +464,16 @@ export const updateUpcomingMatchesCache = async () => {
         if (isRateLimited) {
           console.warn('⚠️ API rate limited during cache update:', reason)
           markKeyAsRateLimited(apiKey)
-          return cache.upcoming || { data: [] }
+          // Return empty array if rate limited (can't fetch data)
+          return { data: [] }
         }
         console.error('❌ API returned failure:', reason)
+        return { data: [] }
       }
 
-      return cache.upcoming || { data: [] }
+      // If we got here, API call succeeded but response format was unexpected
+      console.warn('⚠️ Unexpected API response format')
+      return { data: [] }
     } catch (error) {
       const errorMessage = error.message || error.response?.data?.reason || ''
       const isRateLimited = errorMessage.toLowerCase().includes('blocked') || 
